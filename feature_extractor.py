@@ -15,8 +15,13 @@ from docx import Document
 from PIL import Image
 import pytesseract
 
-# Set Tesseract path
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Set Tesseract path (Windows default; skipped if not found)
+import shutil
+_tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+if Path(_tesseract_path).exists():
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_path
+elif shutil.which('tesseract'):
+    pytesseract.pytesseract.tesseract_cmd = shutil.which('tesseract')
 
 from config import (
     TECHNICAL_SKILLS, SOFT_SKILLS, EDUCATION_LEVELS,
