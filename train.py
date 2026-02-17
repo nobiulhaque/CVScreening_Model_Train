@@ -109,12 +109,16 @@ def train_model():
 
     # Load data
     features, labels, texts, categories = load_data()
-    if features is None:
+    if features is None or categories is None:
         return
+    
+    # Type narrowing: if features & categories loaded, so did labels & texts
+    assert labels is not None
+    assert texts is not None
 
     # Class distribution
     print("Class distribution:")
-    for idx, cat in enumerate(categories):
+    for idx, cat in enumerate(categories): 
         count = np.sum(labels == idx)
         print(f"  {cat:20} {count:4}")
 
@@ -142,7 +146,7 @@ def train_model():
 
     # Check GPU availability for boosting models
     try:
-        import torch
+        import torch # type: ignore
         has_gpu = torch.cuda.is_available()
         gpu_name = torch.cuda.get_device_name(0) if has_gpu else "N/A"
     except ImportError:
@@ -200,11 +204,11 @@ def train_model():
             min_count = min(Counter(y_fold_train).values())
             k = min(5, min_count - 1) if min_count > 1 else 1
             sm = SMOTE(random_state=42, k_neighbors=k)
-            X_res, y_res = sm.fit_resample(X_fold_train, y_fold_train)
+            X_res, y_res = sm.fit_resample(X_fold_train, y_fold_train) # type: ignore
 
             # Scale
             sc = StandardScaler()
-            X_res = sc.fit_transform(X_res)
+            X_res = sc.fit_transform(X_res) # type: ignore
             X_fold_val = sc.transform(X_fold_val)
 
             # Train & predict (suppress noisy warnings)
@@ -236,10 +240,10 @@ def train_model():
     min_class_count = min(Counter(labels).values())
     k_neighbors = min(5, min_class_count - 1) if min_class_count > 1 else 1
     smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
-    X_all_resampled, y_all_resampled = smote.fit_resample(X_combined, labels)
+    X_all_resampled, y_all_resampled = smote.fit_resample(X_combined, labels) # type: ignore
 
     scaler = StandardScaler()
-    X_all_scaled = scaler.fit_transform(X_all_resampled)
+    X_all_scaled = scaler.fit_transform(X_all_resampled) # type: ignore
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

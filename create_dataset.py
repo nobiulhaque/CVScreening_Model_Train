@@ -131,7 +131,10 @@ def process_resume_folders(folders, extractor, seen_hashes):
                     features["source"] = folder_path.name
                 all_data.append(features)
                 stats[category] += 1
-            except Exception:
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
+                print(f"    [SKIP] Error processing {file_path.name}: {type(e).__name__}")
                 stats["errors"] += 1
 
     print(f"\n  Raw resume files processed:")

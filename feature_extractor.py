@@ -542,25 +542,31 @@ def extract_text_from_file(file_path: Path) -> str:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 logging.getLogger("PyPDF2").setLevel(logging.CRITICAL)
-                with open(file_path, 'rb') as f:
-                    reader = PyPDF2.PdfReader(f, strict=False)
-                    for page in reader.pages:
-                        try:
-                            page_text = page.extract_text() or ""
-                            # Remove surrogate characters that cause encoding errors
-                            page_text = page_text.encode('utf-8', errors='replace').decode('utf-8')
-                            text += page_text
-                        except Exception:
-                            continue
+                try:
+                    with open(file_path, 'rb') as f:
+                        reader = PyPDF2.PdfReader(f, strict=False)
+                        for page in reader.pages:
+                            try:
+                                page_text = page.extract_text() or ""
+                                # Remove surrogate characters that cause encoding errors
+                                page_text = page_text.encode('utf-8', errors='replace').decode('utf-8')
+                                text += page_text
+                            except (KeyboardInterrupt, SystemExit):
+                                raise
+                            except Exception:
+                                continue
+                except (KeyboardInterrupt, SystemExit, RuntimeError, TypeError):
+                    # Skip problematic PDFs (e.g., corrupted or incompatible with PyPDF2)
+                    return ""
             return text.strip()
 
         elif suffix == '.docx':
-            doc = Document(file_path)
+            doc = Document(str(file_path))
             return "\n".join(para.text for para in doc.paragraphs).strip()
 
         elif suffix == '.doc':
             try:
-                doc = Document(file_path)
+                doc = Document(str(file_path))
                 return "\n".join(para.text for para in doc.paragraphs).strip()
             except Exception:
                 return ""
