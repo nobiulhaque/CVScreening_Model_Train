@@ -95,6 +95,18 @@ def process_resume_folders(folders, extractor, seen_hashes):
     all_data = []
     stats = Counter()
 
+    format_priority = {
+        ".pdf": 0,
+        ".docx": 1,
+        ".doc": 2,
+        ".txt": 3,
+        ".png": 4,
+        ".jpg": 4,
+        ".jpeg": 4,
+        ".bmp": 4,
+        ".tiff": 4,
+    }
+
     for folder_path, category in folders:
         files = [
             f for f in sorted(folder_path.iterdir())
@@ -104,7 +116,7 @@ def process_resume_folders(folders, extractor, seen_hashes):
         # Deduplicate by stem (skip .txt if .pdf or .docx exists)
         seen_stems = set()
         unique_files = []
-        for f in sorted(files, key=lambda x: x.suffix):
+        for f in sorted(files, key=lambda x: (x.stem.lower(), format_priority.get(x.suffix.lower(), 99), x.suffix.lower())):
             if f.stem not in seen_stems:
                 seen_stems.add(f.stem)
                 unique_files.append(f)

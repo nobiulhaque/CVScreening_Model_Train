@@ -45,15 +45,31 @@ class ResumeScreeningEngine:
 
         # Load trained artifacts
         model_path = model_dir / "best_classifier.pkl"
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Missing model artifact: {model_path}. Run train.py after create_dataset.py."
+            )
         self.model = joblib.load(model_path)
 
         scaler_path = model_dir / "scaler.pkl"
+        if not scaler_path.exists():
+            raise FileNotFoundError(
+                f"Missing scaler artifact: {scaler_path}. Run train.py after create_dataset.py."
+            )
         self.scaler = joblib.load(scaler_path)
 
         tfidf_path = model_dir / "tfidf_vectorizer.pkl"
+        if not tfidf_path.exists():
+            raise FileNotFoundError(
+                f"Missing TF-IDF artifact: {tfidf_path}. Run train.py after create_dataset.py."
+            )
         self.tfidf = joblib.load(tfidf_path)
 
         meta_path = model_dir / "model_metadata.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"Missing metadata artifact: {meta_path}. Run train.py after create_dataset.py."
+            )
         with open(meta_path, 'r') as f:
             self.metadata = json.load(f)
 

@@ -52,6 +52,7 @@ def load_data():
     # Load skill vectors
     features = []
     labels = []
+    filenames = []
 
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -59,6 +60,7 @@ def load_data():
             category = row["category"]
             label = categories.index(category)
             labels.append(label)
+            filenames.append(row.get("filename", ""))
 
             feature_vec = []
             for key, value in row.items():
@@ -77,13 +79,20 @@ def load_data():
     if corpus_path.exists():
         with open(corpus_path, 'r', encoding='utf-8') as f:
             corpus_data = json.load(f)
-        texts = [item.get("raw_text", "") for item in corpus_data]
-        print(f"Loaded raw text corpus ({len(texts)} docs)")
+        text_map = {
+            item.get("filename", ""): item.get("raw_text", "")
+            for item in corpus_data
+        }
+        texts = [text_map.get(fname, "") for fname in filenames]
+        missing = sum(1 for t in texts if not t)
+        print(f"Loaded raw text corpus ({len(corpus_data)} docs)")
+        if missing:
+            print(f"WARNING: Missing raw text for {missing} sample(s); using empty text.")
     else:
         # Fallback: use extracted skills from JSON
         with open(json_path, 'r', encoding='utf-8') as f:
             json_data = json.load(f)
-        texts = []
+        fallback_map = {}
         for item in json_data:
             text_parts = []
             text_parts.extend(item.get("technical_skills", []))
@@ -93,8 +102,13 @@ def load_data():
             edu = item.get("education_level", "")
             if edu:
                 text_parts.append(edu)
-            texts.append(" ".join(text_parts))
+            fallback_map[item.get("filename", "")] = " ".join(text_parts)
+        texts = [fallback_map.get(fname, "") for fname in filenames]
         print(f"Using extracted skills as text (raw corpus not found)")
+
+    if len(texts) != len(features):
+        print("ERROR: Text/feature sample size mismatch. Re-run create_dataset.py.")
+        return None, None, None, None
 
     print(f"Loaded {len(features)} samples with {features.shape[1]} skill features")
     return features, labels, texts, categories
@@ -136,8 +150,9 @@ def train_model():
 
     # Combine skill vectors + TF-IDF
     skill_sparse = csr_matrix(features)
-    X_combined = hstack([skill_sparse, tfidf_features]).toarray()
-    print(f"Total features: {X_combined.shape[1]}")
+    X_combined_sparse = csr_matrix(hstack([skill_sparse, tfidf_features]))
+    total_features = int(features.shape[1] + tfidf_features.shape[1])
+    print(f"Total features: {total_features}")
 
     # ==================== Proper Evaluation (SMOTE inside each fold) ====================
     print("\n" + "=" * 60)
@@ -196,9 +211,13 @@ def train_model():
     for name, template in model_templates.items():
         print(f"  Training {name}...", end=" ", flush=True)
         fold_accs = []
-        for train_idx, val_idx in cv.split(X_combined, labels):
-            X_fold_train, X_fold_val = X_combined[train_idx], X_combined[val_idx]
+        for train_idx, val_idx in cv.split(np.zeros(len(labels)), labels):
+            X_fold_train, X_fold_val = X_combined_sparse[train_idx], X_combined_sparse[val_idx]
             y_fold_train, y_fold_val = labels[train_idx], labels[val_idx]
+
+            # Convert fold slices to dense right before SMOTE to avoid global dense copy.
+            X_fold_train = X_fold_train.toarray()
+            X_fold_val = X_fold_val.toarray()
 
             # SMOTE inside the fold
             min_count = min(Counter(y_fold_train).values())
@@ -240,7 +259,8 @@ def train_model():
     min_class_count = min(Counter(labels).values())
     k_neighbors = min(5, min_class_count - 1) if min_class_count > 1 else 1
     smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
-    X_all_resampled, y_all_resampled = smote.fit_resample(X_combined, labels) # type: ignore
+    X_all_dense = X_combined_sparse.toarray()
+    X_all_resampled, y_all_resampled = smote.fit_resample(X_all_dense, labels) # type: ignore
 
     scaler = StandardScaler()
     X_all_scaled = scaler.fit_transform(X_all_resampled) # type: ignore
@@ -251,7 +271,7 @@ def train_model():
         final_model.fit(X_all_scaled, y_all_resampled)
 
     # Quick check: accuracy on original (non-resampled) data
-    X_orig_scaled = scaler.transform(X_combined)
+    X_orig_scaled = scaler.transform(X_all_dense)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         train_pred = final_model.predict(X_orig_scaled)
@@ -299,7 +319,7 @@ def train_model():
         "skill_list": TECHNICAL_SKILLS + SOFT_SKILLS,
         "num_skill_features": features.shape[1],
         "num_tfidf_features": tfidf_features.shape[1],
-        "total_features": X_combined.shape[1],
+        "total_features": total_features,
         "total_samples": len(labels),
     }
     meta_path = MODEL_SAVE_DIR / "model_metadata.json"

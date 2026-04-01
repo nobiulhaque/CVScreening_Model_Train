@@ -247,11 +247,11 @@ class ResumeFeatureExtractor:
 
     def has_phone(self, text: str) -> bool:
         """Check if resume has phone number"""
-        return bool(re.search(r'[\+]?[\d\s\-\(\)]{7,15}', text))
+        return bool(re.search(r'(?<!\d)(?:\+?\d[\d\s\-\(\)]{8,}\d)(?!\d)', text))
 
     def extract_phone(self, text: str) -> str:
         """Extract first phone number"""
-        match = re.search(r'[\+]?[\d\s\-\(\)]{7,15}', text)
+        match = re.search(r'(?<!\d)(?:\+?\d[\d\s\-\(\)]{8,}\d)(?!\d)', text)
         return match.group(0).strip() if match else ""
 
     def extract_job_titles(self, text: str) -> List[str]:
@@ -509,7 +509,7 @@ class ResumeFeatureExtractor:
             e = cur_year if e_raw in ('present', 'current') else int(e_raw)
             if 1980 <= s <= cur_year:
                 stints.append(e - s)
-        short_stints = [d for d in stints if 0 <= d < 1]
+        short_stints = [d for d in stints if 0 < d <= 1]
         if len(short_stints) >= 3:
             flags.append({
                 "flag": "job_hopping",

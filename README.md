@@ -18,7 +18,7 @@ An ML-powered Applicant Tracking System (ATS) that automatically classifies resu
   - Knockout criteria (auto-reject on hard filters)
 - **Job Description Parser** — pass free-text JDs and the engine extracts structured requirements automatically.
 - **Candidate Ranking** — rank and compare multiple resumes for a single position.
-- **Multi-Format Support** — PDF, DOCX, DOC, TXT, and image-based resumes (via Tesseract OCR).
+- **Multi-Format Support** — PDF, DOCX, TXT, and image-based resumes (via Tesseract OCR), with best-effort extraction for legacy DOC files.
 - **GPU Acceleration** — automatic GPU detection for CatBoost and LightGBM training.
 
 ## Project Structure
