@@ -139,7 +139,7 @@ def train_model():
     # ==================== TF-IDF Features ====================
     print("\nBuilding TF-IDF features...")
     tfidf = TfidfVectorizer(
-        max_features=200,
+        max_features=600,
         ngram_range=(1, 2),
         min_df=2,
         max_df=0.95,

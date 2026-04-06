@@ -13,8 +13,12 @@ import csv
 import json
 import ast
 import hashlib
+import os
+import re
 from pathlib import Path
 from collections import Counter
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from feature_extractor import ResumeFeatureExtractor, extract_text_from_file
 from config import (
@@ -28,8 +32,45 @@ from config import (
 # ======================================================================
 
 def normalize_category(name: str) -> str:
-    """Normalize a category name: lowercase, strip whitespace, replace spaces with hyphens."""
-    return name.lower().strip().replace(" ", "-")
+    """Standardize category names to merge duplicates."""
+    name = name.lower().strip()
+    # 1. Strip common noise suffixes like '-resumes'
+    name = re.sub(r'[-_\s]*(resumes?|cv|profiler?)$', '', name)
+    # 2. Merge hyphenated/spaced variations (data-science vs datascience)
+    name = re.sub(r'[^a-z0-9]', '', name)
+    
+    # 3. Handle manual merges for synonyms and near-duplicates
+    mapping = {
+        "advocate": "legal",
+        "advocateresumes": "legal",
+        "civil": "civil-engineering",
+        "civilengineer": "civil-engineering",
+        "civilengineering": "civil-engineering",
+        "hr": "human-resources",
+        "humanresources": "human-resources",
+        "managment": "management",
+        "operationmanager": "operations",
+        "operationsmanager": "operations",
+        "python": "python-developer",
+        "pythondeveloper": "python-developer",
+        "java": "java-developer",
+        "javadeveloper": "java-developer",
+        "agricultural": "agriculture",
+        "electricalengineer": "electrical-engineering",
+        "electricalengineering": "electrical-engineering",
+        "informationtechnology": "it",
+        "itresumes": "it",
+        "sqldeveloper": "sql",
+        "etldeveloper": "etl",
+        "reactdeveloper": "react",
+        "dotnetdeveloper": "dotnet",
+        "webdesigning": "design",
+        "designing": "design",
+        "designer": "design",
+        "pmo": "project-management",
+        "pbo": "project-management",
+    }
+    return mapping.get(name, name)
 
 
 def text_hash(text: str) -> str:
@@ -62,8 +103,8 @@ def discover_resume_folders(root: Path):
     """
     results = []
 
-    for dirpath in sorted(root.rglob("*")):
-        if not dirpath.is_dir():
+    for dirpath in sorted(root.glob("**/")):
+        if dirpath == root:
             continue
         # A folder is a "resume folder" if it directly contains resume files
         has_files = any(
@@ -85,28 +126,50 @@ def discover_csv_files(root: Path):
 
 
 # ======================================================================
+# Multiprocessing Workers
+# ======================================================================
+
+def _process_file_worker(file_path, category, source):
+    """Worker function to process a single file in parallel."""
+    try:
+        # Initialize extractor inside worker to avoid pickle issues
+        from feature_extractor import ResumeFeatureExtractor, extract_text_from_file
+        extractor = ResumeFeatureExtractor()
+        
+        text = extract_text_from_file(file_path)
+        if not text or len(text) < 50:
+            return "skipped_short", None, None
+
+        h = hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
+        
+        features = extractor.extract_all(text)
+        features["category"] = category
+        features["filename"] = file_path.name
+        features["source"] = source
+        
+        return "success", h, features
+    except Exception as e:
+        return "error", str(e), file_path.name
+
+
+# ======================================================================
 # Processing
 # ======================================================================
 
 def process_resume_folders(folders, extractor, seen_hashes):
-    """Extract features from raw resume files in discovered folders.
+    """Extract features from raw resume files in discovered folders in PARALLEL.
     Deduplicates by content hash.
     """
     all_data = []
     stats = Counter()
 
     format_priority = {
-        ".pdf": 0,
-        ".docx": 1,
-        ".doc": 2,
-        ".txt": 3,
-        ".png": 4,
-        ".jpg": 4,
-        ".jpeg": 4,
-        ".bmp": 4,
-        ".tiff": 4,
+        ".pdf": 0, ".docx": 1, ".doc": 2, ".txt": 3,
+        ".png": 4, ".jpg": 4, ".jpeg": 4, ".bmp": 4, ".tiff": 4,
     }
 
+    # Step 1: Collect all work items
+    work_items = []
     for folder_path, category in folders:
         files = [
             f for f in sorted(folder_path.iterdir())
@@ -115,39 +178,46 @@ def process_resume_folders(folders, extractor, seen_hashes):
 
         # Deduplicate by stem (skip .txt if .pdf or .docx exists)
         seen_stems = set()
-        unique_files = []
         for f in sorted(files, key=lambda x: (x.stem.lower(), format_priority.get(x.suffix.lower(), 99), x.suffix.lower())):
             if f.stem not in seen_stems:
                 seen_stems.add(f.stem)
-                unique_files.append(f)
-
-        for file_path in unique_files:
-            try:
-                text = extract_text_from_file(file_path)
-                if not text or len(text) < 50:
-                    stats["skipped_short"] += 1
-                    continue
-
-                h = text_hash(text)
-                if h in seen_hashes:
-                    stats["skipped_dup"] += 1
-                    continue
-                seen_hashes.add(h)
-
-                features = extractor.extract_all(text)
-                features["category"] = category
-                features["filename"] = file_path.name
                 try:
-                    features["source"] = str(folder_path.relative_to(folder_path.parents[2]))
+                    source = str(folder_path.relative_to(folder_path.parents[2]))
                 except (IndexError, ValueError):
-                    features["source"] = folder_path.name
-                all_data.append(features)
-                stats[category] += 1
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except Exception as e:
-                print(f"    [SKIP] Error processing {file_path.name}: {type(e).__name__}")
-                stats["errors"] += 1
+                    source = folder_path.name
+                work_items.append((f, category, source))
+
+    # Step 2: Use multiprocessing pool
+    print(f"\n  [Multiprocessing] Using {os.cpu_count()} CPU cores ...")
+    
+    with tqdm(total=len(work_items), desc="Parsing Resumes", unit="file", leave=True) as pbar:
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+            # Submit all jobs
+            future_to_file = {
+                executor.submit(_process_file_worker, f, cat, src): f
+                for f, cat, src in work_items
+            }
+            
+            for future in as_completed(future_to_file):
+                status, result, content = future.result()
+                
+                if status == "success":
+                    h = result # hash
+                    features = content # features dict
+                    
+                    if h in seen_hashes:
+                        stats["skipped_dup"] += 1
+                    else:
+                        seen_hashes.add(h)
+                        all_data.append(features)
+                        stats[features["category"]] += 1
+                elif status == "skipped_short":
+                    stats["skipped_short"] += 1
+                elif status == "error":
+                    print(f"    [SKIP] Error processing {content}: {result}")
+                    stats["errors"] += 1
+                
+                pbar.update(1)
 
     print(f"\n  Raw resume files processed:")
     for cat in sorted(c for c in stats if c not in ("skipped_dup", "skipped_short", "errors")):

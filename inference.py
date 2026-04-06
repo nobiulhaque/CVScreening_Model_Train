@@ -156,14 +156,8 @@ class ResumeScreeningEngine:
         jd_lower = jd_text.lower()
 
         # --- Extract required skills ---
-        found_skills = []
-        for skill in self.all_skills:
-            if len(skill) <= 3:
-                if re.search(r'\b' + re.escape(skill) + r'\b', jd_lower):
-                    found_skills.append(skill)
-            else:
-                if skill in jd_lower:
-                    found_skills.append(skill)
+        all_resume_skills_regex = re.compile(r'\b(' + '|'.join(map(re.escape, sorted(self.all_skills, key=len, reverse=True))) + r')\b')
+        found_skills = list(set(all_resume_skills_regex.findall(jd_lower)))
 
         # Split into required (near "required"/"must") vs preferred
         required_context = ""

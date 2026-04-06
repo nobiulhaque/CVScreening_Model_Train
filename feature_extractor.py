@@ -38,6 +38,14 @@ class ResumeFeatureExtractor:
         self.soft_skills = [s.lower() for s in SOFT_SKILLS]
         self.certifications = [c.lower() for c in CERTIFICATIONS]
 
+        # Pre-compile Regex for faster skill matching (Crucial for large datasets)
+        # We sort by length descending to match 'c++' before 'c', etc.
+        sorted_tech = sorted(self.technical_skills, key=len, reverse=True)
+        self.tech_regex = re.compile(r'\b(' + '|'.join(map(re.escape, sorted_tech)) + r')\b')
+        
+        sorted_soft = sorted(self.soft_skills, key=len, reverse=True)
+        self.soft_regex = re.compile(r'\b(' + '|'.join(map(re.escape, sorted_soft)) + r')\b')
+
     def extract_all(self, text: str) -> Dict:
         """Extract ALL features from resume text — full ATS-grade extraction"""
         text_lower = text.lower()
@@ -130,25 +138,12 @@ class ResumeFeatureExtractor:
         return features
 
     def extract_technical_skills(self, text: str) -> List[str]:
-        """Extract technical skills found in text"""
-        found = []
-        for skill in self.technical_skills:
-            # Use word boundary matching for short skills
-            if len(skill) <= 3:
-                if re.search(r'\b' + re.escape(skill) + r'\b', text):
-                    found.append(skill)
-            else:
-                if skill in text:
-                    found.append(skill)
-        return list(set(found))
+        """Extract technical skills found in text (Optimized)"""
+        return list(set(self.tech_regex.findall(text)))
 
     def extract_soft_skills(self, text: str) -> List[str]:
-        """Extract soft skills found in text"""
-        found = []
-        for skill in self.soft_skills:
-            if skill in text:
-                found.append(skill)
-        return list(set(found))
+        """Extract soft skills found in text (Optimized)"""
+        return list(set(self.soft_regex.findall(text)))
 
     def extract_years_of_experience(self, text: str) -> int:
         """Extract years of experience from resume text"""
@@ -558,6 +553,17 @@ def extract_text_from_file(file_path: Path) -> str:
                 except (KeyboardInterrupt, SystemExit, RuntimeError, TypeError):
                     # Skip problematic PDFs (e.g., corrupted or incompatible with PyPDF2)
                     return ""
+            
+            if len(text.strip()) < 50:
+                # Fallback: Treat PDF as image and use OCR if it is empty/scanned
+                try:
+                    from pdf2image import convert_from_path # type: ignore
+                    images = convert_from_path(file_path)
+                    text = ""
+                    for img in images:
+                        text += pytesseract.image_to_string(img)
+                except (ImportError, Exception):
+                    pass
             return text.strip()
 
         elif suffix == '.docx':
