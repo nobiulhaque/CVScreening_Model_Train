@@ -171,12 +171,14 @@ def train_model():
 
     # Dynamic fold count — can't have more folds than smallest class size
     min_class_size = min(Counter(labels).values())
-    n_folds = min(5, min_class_size)
-    if n_folds < 2:
-        n_folds = 2
-    print(f"  CV folds: {n_folds} (smallest class has {min_class_size} samples)")
-
-    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    if min_class_size < 2:
+        print("WARNING: At least one class has only 1 sample. Stratified CV with SMOTE is not feasible.")
+        print("         CV will be skipped and model will be trained on all data instead.")
+        cv = None
+    else:
+        n_folds = min(5, min_class_size)
+        print(f"  CV folds: {n_folds} (smallest class has {min_class_size} samples)")
+        cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     catboost_params = {
         'iterations': 300, 'depth': 6, 'learning_rate': 0.1,
@@ -208,43 +210,54 @@ def train_model():
     }
 
     cv_results = {}
-    for name, template in model_templates.items():
-        print(f"  Training {name}...", end=" ", flush=True)
-        fold_accs = []
-        for train_idx, val_idx in cv.split(np.zeros(len(labels)), labels):
-            X_fold_train, X_fold_val = X_combined_sparse[train_idx], X_combined_sparse[val_idx]
-            y_fold_train, y_fold_val = labels[train_idx], labels[val_idx]
+    if cv is not None:
+        for name, template in model_templates.items():
+            print(f"  Training {name}...", end=" ", flush=True)
+            fold_accs = []
+            for train_idx, val_idx in cv.split(np.zeros(len(labels)), labels):
+                X_fold_train, X_fold_val = X_combined_sparse[train_idx], X_combined_sparse[val_idx]
+                y_fold_train, y_fold_val = labels[train_idx], labels[val_idx]
 
-            # Convert fold slices to dense right before SMOTE to avoid global dense copy.
-            X_fold_train = X_fold_train.toarray()
-            X_fold_val = X_fold_val.toarray()
+                # Convert fold slices to dense right before SMOTE to avoid global dense copy.
+                X_fold_train = X_fold_train.toarray()
+                X_fold_val = X_fold_val.toarray()
 
-            # SMOTE inside the fold
-            min_count = min(Counter(y_fold_train).values())
-            k = min(5, min_count - 1) if min_count > 1 else 1
-            sm = SMOTE(random_state=42, k_neighbors=k)
-            X_res, y_res = sm.fit_resample(X_fold_train, y_fold_train) # type: ignore
+                # SMOTE inside the fold if possible
+                min_count = min(Counter(y_fold_train).values())
+                if min_count > 1:
+                    k = min(5, min_count - 1)
+                    sm = SMOTE(random_state=42, k_neighbors=k)
+                    X_res, y_res = sm.fit_resample(X_fold_train, y_fold_train) # type: ignore
+                else:
+                    X_res, y_res = X_fold_train, y_fold_train
 
-            # Scale
-            sc = StandardScaler()
-            X_res = sc.fit_transform(X_res) # type: ignore
-            X_fold_val = sc.transform(X_fold_val)
+                # Scale
+                sc = StandardScaler()
+                X_res = sc.fit_transform(X_res) # type: ignore
+                X_fold_val = sc.transform(X_fold_val)
 
-            # Train & predict (suppress noisy warnings)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                m = sk_clone(template)
-                m.fit(X_res, y_res)
-                preds = m.predict(X_fold_val)
-            fold_accs.append(accuracy_score(y_fold_val, preds))
+                # Train & predict (suppress noisy warnings)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    m = sk_clone(template)
+                    m.fit(X_res, y_res)
+                    preds = m.predict(X_fold_val)
+                fold_accs.append(accuracy_score(y_fold_val, preds))
 
-        mean_acc = np.mean(fold_accs)
-        std_acc = np.std(fold_accs)
-        cv_results[name] = (mean_acc, std_acc)
-        print(f"{mean_acc*100:.1f}% (+/- {std_acc*100:.1f}%)")
+            mean_acc = np.mean(fold_accs)
+            std_acc = np.std(fold_accs)
+            cv_results[name] = (mean_acc, std_acc)
+            print(f"{mean_acc*100:.1f}% (+/- {std_acc*100:.1f}%)")
 
-    best_cv_name = max(cv_results, key=lambda k: cv_results[k][0])
-    print(f"\n  Best by CV: {best_cv_name} ({cv_results[best_cv_name][0]*100:.1f}%)")
+        best_cv_name = max(cv_results, key=lambda k: cv_results[k][0])
+        print(f"\n  Best by CV: {best_cv_name} ({cv_results[best_cv_name][0]*100:.1f}%)")
+    else:
+        # No reliable CV possible (singleton class, etc.)
+        print("\nSkipping cross-validation due to insufficient class sample sizes.")
+        for name in model_templates:
+            cv_results[name] = (0.0, 0.0)
+        best_cv_name = 'Random Forest'
+        print(f"Using default model: {best_cv_name}")
 
     # ==================== Train Final Model on ALL Data ====================
     print(f"\n{'='*60}")
@@ -255,12 +268,16 @@ def train_model():
     print(f"Training final {best_cv_name} on all data...")
     final_model_template = model_templates[best_cv_name]
 
-    # Apply SMOTE on all data
+    # Apply SMOTE on all data if possible
     min_class_count = min(Counter(labels).values())
-    k_neighbors = min(5, min_class_count - 1) if min_class_count > 1 else 1
-    smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
     X_all_dense = X_combined_sparse.toarray()
-    X_all_resampled, y_all_resampled = smote.fit_resample(X_all_dense, labels) # type: ignore
+    if min_class_count > 1:
+        k_neighbors = min(5, min_class_count - 1)
+        smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
+        X_all_resampled, y_all_resampled = smote.fit_resample(X_all_dense, labels) # type: ignore
+    else:
+        print("WARNING: Not enough samples for SMOTE on full data; using original dataset without SMOTE.")
+        X_all_resampled, y_all_resampled = X_all_dense, labels
 
     scaler = StandardScaler()
     X_all_scaled = scaler.fit_transform(X_all_resampled) # type: ignore
