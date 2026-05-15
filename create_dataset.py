@@ -69,6 +69,27 @@ def normalize_category(name: str) -> str:
         "designer": "design",
         "pmo": "project-management",
         "pbo": "project-management",
+        "architect": "architecture",
+        "architects": "architecture",
+        "consult": "consultant",
+        "building": "construction",
+        "buildingconstruction": "construction",
+        "digital": "digital-media",
+        "digitalmedia": "digital-media",
+        "dot": "dotnet",
+        "food": "food-beverages",
+        "foodbeverages": "food-beverages",
+        "nse": "network-security",
+        "networksecurityengineer": "network-security",
+        "public": "public-relations",
+        "publicrelations": "public-relations",
+        "businessanalyst": "business-analyst",
+        "devopsengineer": "devops",
+        "mechanicalengineer": "mechanical-engineering",
+        "healthfitness": "health-fitness",
+        "sapdeveloper": "sap",
+        "webdesigning": "design",
+        "react": "react-developer",
     }
     return mapping.get(name, name)
 
@@ -129,12 +150,17 @@ def discover_csv_files(root: Path):
 # Multiprocessing Workers
 # ======================================================================
 
+# Global extractor to be initialized once per process
+_extractor = None
+
 def _process_file_worker(file_path, category, source):
     """Worker function to process a single file in parallel."""
+    global _extractor
     try:
-        # Initialize extractor inside worker to avoid pickle issues
-        from feature_extractor import ResumeFeatureExtractor, extract_text_from_file
-        extractor = ResumeFeatureExtractor()
+        # Initialize extractor ONCE per worker process
+        if _extractor is None:
+            from feature_extractor import ResumeFeatureExtractor
+            _extractor = ResumeFeatureExtractor()
         
         text = extract_text_from_file(file_path)
         if not text or len(text) < 50:
@@ -142,7 +168,7 @@ def _process_file_worker(file_path, category, source):
 
         h = hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
         
-        features = extractor.extract_all(text)
+        features = _extractor.extract_all(text)
         features["category"] = category
         features["filename"] = file_path.name
         features["source"] = source
@@ -157,75 +183,89 @@ def _process_file_worker(file_path, category, source):
 # ======================================================================
 
 def process_resume_folders(folders, extractor, seen_hashes):
-    """Extract features from raw resume files in discovered folders in PARALLEL.
-    Deduplicates by content hash.
-    """
+    """Process folders of raw resume files in parallel with caching."""
     all_data = []
     stats = Counter()
-
-    format_priority = {
-        ".pdf": 0, ".docx": 1, ".doc": 2, ".txt": 3,
-        ".png": 4, ".jpg": 4, ".jpeg": 4, ".bmp": 4, ".tiff": 4,
-    }
-
-    # Step 1: Collect all work items
-    work_items = []
-    for folder_path, category in folders:
-        files = [
-            f for f in sorted(folder_path.iterdir())
-            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
-        ]
-
-        # Deduplicate by stem (skip .txt if .pdf or .docx exists)
-        seen_stems = set()
-        for f in sorted(files, key=lambda x: (x.stem.lower(), format_priority.get(x.suffix.lower(), 99), x.suffix.lower())):
-            if f.stem not in seen_stems:
-                seen_stems.add(f.stem)
-                try:
-                    source = str(folder_path.relative_to(folder_path.parents[2]))
-                except (IndexError, ValueError):
-                    source = folder_path.name
-                work_items.append((f, category, source))
-
-    # Step 2: Use multiprocessing pool
-    print(f"\n  [Multiprocessing] Using {os.cpu_count()} CPU cores ...")
     
-    with tqdm(total=len(work_items), desc="Parsing Resumes", unit="file", leave=True) as pbar:
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-            # Submit all jobs
-            future_to_file = {
-                executor.submit(_process_file_worker, f, cat, src): f
-                for f, cat, src in work_items
+    cache_path = PROCESSED_DATA_DIR / "feature_cache.json"
+    cache = {}
+    if cache_path.exists():
+        try:
+            with open(cache_path, 'r') as f:
+                cache = json.load(f)
+            print(f"  Loaded {len(cache)} items from cache.")
+        except Exception:
+            print("  Cache corrupted, starting fresh.")
+
+    # 1. Collect all files and filter by cache
+    tasks = []
+    skipped_cache = 0
+    
+    print("  Checking files against cache...")
+    all_files_to_process = []
+    for folder_path, category in folders:
+        for f in folder_path.iterdir():
+            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS:
+                all_files_to_process.append((f, category))
+
+    for file_path, category in tqdm(all_files_to_process, desc="Filtering"):
+        try:
+            # Fast check: name + size + mtime
+            stat = file_path.stat()
+            file_key = f"{file_path.name}_{stat.st_size}_{stat.st_mtime}"
+            
+            if file_key in cache:
+                features = cache[file_key]
+                all_data.append(features)
+                stats[features["category"]] += 1
+                skipped_cache += 1
+            else:
+                tasks.append((file_path, category, file_key))
+        except Exception:
+            continue
+
+    if skipped_cache:
+        print(f"  Skipped {skipped_cache} files using cache.")
+
+    # 2. Process only new/changed files
+    if tasks:
+        print(f"  Processing {len(tasks)} new/changed files with {os.cpu_count()} cores...")
+        new_cache_entries = {}
+        with ProcessPoolExecutor() as executor:
+            futures = {
+                executor.submit(_process_file_worker, tp[0], tp[1], "raw_file"): tp[2] 
+                for tp in tasks
             }
             
-            for future in as_completed(future_to_file):
-                status, result, content = future.result()
-                
-                if status == "success":
-                    h = result # hash
-                    features = content # features dict
+            with tqdm(total=len(tasks), desc="Parsing Resumes") as pbar:
+                for future in as_completed(futures):
+                    file_key = futures[future]
+                    status, result, features = future.result()
                     
-                    if h in seen_hashes:
-                        stats["skipped_dup"] += 1
-                    else:
-                        seen_hashes.add(h)
+                    if status == "success":
                         all_data.append(features)
+                        new_cache_entries[file_key] = features
                         stats[features["category"]] += 1
-                elif status == "skipped_short":
-                    stats["skipped_short"] += 1
-                elif status == "error":
-                    print(f"    [SKIP] Error processing {content}: {result}")
-                    stats["errors"] += 1
-                
-                pbar.update(1)
+                    elif status == "skipped_short":
+                        stats["skipped_short"] += 1
+                    elif status == "error":
+                        print(f"    [SKIP] Error processing {file_key}: {result}")
+                        stats["errors"] += 1
+                    pbar.update(1)
+
+        # Update and save cache
+        if new_cache_entries:
+            cache.update(new_cache_entries)
+            PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, 'w') as f:
+                json.dump(cache, f)
+            print(f"  Cache updated with {len(new_cache_entries)} new entries.")
 
     print(f"\n  Raw resume files processed:")
-    for cat in sorted(c for c in stats if c not in ("skipped_dup", "skipped_short", "errors")):
-        print(f"    {cat:20} {stats.get(cat, 0):5}")
-    print(f"    {'duplicates skipped':20} {stats.get('skipped_dup', 0):5}")
-    print(f"    {'too short skipped':20} {stats.get('skipped_short', 0):5}")
-    print(f"    {'errors':20} {stats.get('errors', 0):5}")
-
+    for cat in sorted(stats.keys()):
+        if cat not in ("skipped_dup", "skipped_short", "errors"):
+            print(f"    {cat:20} {stats.get(cat, 0):5}")
+    
     return all_data
 
 
@@ -255,8 +295,8 @@ def _csv_row_to_text(row):
             inst = institutions[i] if i < len(institutions) else ""
             field = fields[i] if i < len(fields) else ""
             yr = years[i] if i < len(years) else ""
-            edu_parts.append(("{} {} from {} ({})".format(d, field, inst, yr)).strip())
-        parts.append("Education: " + "; ".join(edu_parts))
+            edu_parts.append("Earned a {} in {} from {} in {}.".format(d, field, inst, yr).replace("  ", " "))
+        parts.append("Education: " + " ".join(edu_parts))
 
     # Experience
     companies = safe_parse_list(row.get("professional_company_names", ""))
@@ -268,7 +308,7 @@ def _csv_row_to_text(row):
         comp = companies[i] if i < len(companies) else ""
         sd = start_dates[i] if i < len(start_dates) else ""
         ed = end_dates[i] if i < len(end_dates) else ""
-        parts.append("Experience: {} at {} ({} - {})".format(pos, comp, sd, ed))
+        parts.append("Worked as a {} at {} from {} to {}.".format(pos, comp, sd, ed).replace("  ", " "))
 
     # Responsibilities
     resp = row.get("responsibilities", "").strip()

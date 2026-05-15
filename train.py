@@ -9,6 +9,7 @@ import csv
 import json
 import joblib
 import warnings
+import torch
 from collections import Counter
 
 from sklearn.model_selection import StratifiedKFold
@@ -16,7 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.base import clone as sk_clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
 from scipy.sparse import hstack, csr_matrix
 from imblearn.over_sampling import SMOTE
 from catboost import CatBoostClassifier
@@ -136,22 +137,27 @@ def train_model():
         count = np.sum(labels == idx)
         print(f"  {cat:20} {count:4}")
 
-    # ==================== TF-IDF Features ====================
-    print("\nBuilding TF-IDF features...")
-    tfidf = TfidfVectorizer(
-        max_features=600,
-        ngram_range=(1, 2),
-        min_df=2,
-        max_df=0.95,
-        sublinear_tf=True
+    # ==================== SBERT Semantic Features ====================
+    print("\nBuilding SBERT semantic features (all-MiniLM-L6-v2)...")
+    # This model is fast, small (80MB), and very accurate for semantic search/classification
+    sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    # Check for GPU
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    sbert_model.to(device)
+    
+    sbert_embeddings = sbert_model.encode(
+        texts, 
+        batch_size=32, 
+        show_progress_bar=True, 
+        convert_to_numpy=True
     )
-    tfidf_features = tfidf.fit_transform(texts)
-    print(f"TF-IDF features: {tfidf_features.shape[1]}")
+    print(f"SBERT features: {sbert_embeddings.shape[1]}")
 
-    # Combine skill vectors + TF-IDF
-    skill_sparse = csr_matrix(features)
-    X_combined_sparse = csr_matrix(hstack([skill_sparse, tfidf_features]))
-    total_features = int(features.shape[1] + tfidf_features.shape[1])
+    # Combine skill vectors + SBERT
+    # Both are now dense numpy arrays
+    X_combined = np.hstack([features, sbert_embeddings])
+    total_features = int(X_combined.shape[1])
     print(f"Total features: {total_features}")
 
     # ==================== Proper Evaluation (SMOTE inside each fold) ====================
@@ -160,13 +166,8 @@ def train_model():
     print("=" * 60)
 
     # Check GPU availability for boosting models
-    try:
-        import torch # type: ignore
-        has_gpu = torch.cuda.is_available()
-        gpu_name = torch.cuda.get_device_name(0) if has_gpu else "N/A"
-    except ImportError:
-        has_gpu = False
-        gpu_name = "N/A"
+    has_gpu = torch.cuda.is_available()
+    gpu_name = torch.cuda.get_device_name(0) if has_gpu else "N/A"
     print(f"  GPU: {'YES - ' + gpu_name if has_gpu else 'NO (CPU only)'}")
 
     # Dynamic fold count — can't have more folds than smallest class size
@@ -215,12 +216,8 @@ def train_model():
             print(f"  Training {name}...", end=" ", flush=True)
             fold_accs = []
             for train_idx, val_idx in cv.split(np.zeros(len(labels)), labels):
-                X_fold_train, X_fold_val = X_combined_sparse[train_idx], X_combined_sparse[val_idx]
+                X_fold_train, X_fold_val = X_combined[train_idx], X_combined[val_idx]
                 y_fold_train, y_fold_val = labels[train_idx], labels[val_idx]
-
-                # Convert fold slices to dense right before SMOTE to avoid global dense copy.
-                X_fold_train = X_fold_train.toarray()
-                X_fold_val = X_fold_val.toarray()
 
                 # SMOTE inside the fold if possible
                 min_count = min(Counter(y_fold_train).values())
@@ -270,14 +267,14 @@ def train_model():
 
     # Apply SMOTE on all data if possible
     min_class_count = min(Counter(labels).values())
-    X_all_dense = X_combined_sparse.toarray()
+    X_all_data = X_combined
     if min_class_count > 1:
         k_neighbors = min(5, min_class_count - 1)
         smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
-        X_all_resampled, y_all_resampled = smote.fit_resample(X_all_dense, labels) # type: ignore
+        X_all_resampled, y_all_resampled = smote.fit_resample(X_all_data, labels) # type: ignore
     else:
         print("WARNING: Not enough samples for SMOTE on full data; using original dataset without SMOTE.")
-        X_all_resampled, y_all_resampled = X_all_dense, labels
+        X_all_resampled, y_all_resampled = X_all_data, labels
 
     scaler = StandardScaler()
     X_all_scaled = scaler.fit_transform(X_all_resampled) # type: ignore
@@ -288,7 +285,7 @@ def train_model():
         final_model.fit(X_all_scaled, y_all_resampled)
 
     # Quick check: accuracy on original (non-resampled) data
-    X_orig_scaled = scaler.transform(X_all_dense)
+    X_orig_scaled = scaler.transform(X_all_data)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         train_pred = final_model.predict(X_orig_scaled)
@@ -314,15 +311,10 @@ def train_model():
     joblib.dump(final_model, model_path, compress=3)
     print(f"  Best model: {model_path}")
 
-    # Save scaler
+    # Save Scaler
     scaler_path = MODEL_SAVE_DIR / "scaler.pkl"
     joblib.dump(scaler, scaler_path, compress=3)
     print(f"  Scaler: {scaler_path}")
-
-    # Save TF-IDF vectorizer
-    tfidf_path = MODEL_SAVE_DIR / "tfidf_vectorizer.pkl"
-    joblib.dump(tfidf, tfidf_path, compress=3)
-    print(f"  TF-IDF: {tfidf_path}")
 
     # Save metadata
     best_cv_acc, best_cv_std = cv_results[best_cv_name]
@@ -335,7 +327,8 @@ def train_model():
         "categories": categories,
         "skill_list": TECHNICAL_SKILLS + SOFT_SKILLS,
         "num_skill_features": features.shape[1],
-        "num_tfidf_features": tfidf_features.shape[1],
+        "num_semantic_features": sbert_embeddings.shape[1],
+        "semantic_model": "all-MiniLM-L6-v2",
         "total_features": total_features,
         "total_samples": len(labels),
     }

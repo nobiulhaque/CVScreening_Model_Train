@@ -17,6 +17,7 @@ import json
 import joblib
 from pathlib import Path
 from typing import List, Dict
+from sentence_transformers import SentenceTransformer
 
 from config import (
     MODEL_SAVE_DIR, TOP_K_RESULTS,
@@ -58,13 +59,6 @@ class ResumeScreeningEngine:
             )
         self.scaler = joblib.load(scaler_path)
 
-        tfidf_path = model_dir / "tfidf_vectorizer.pkl"
-        if not tfidf_path.exists():
-            raise FileNotFoundError(
-                f"Missing TF-IDF artifact: {tfidf_path}. Run train.py after create_dataset.py."
-            )
-        self.tfidf = joblib.load(tfidf_path)
-
         meta_path = model_dir / "model_metadata.json"
         if not meta_path.exists():
             raise FileNotFoundError(
@@ -83,6 +77,10 @@ class ResumeScreeningEngine:
             # Fallback for models trained before skill_list was saved
             from config import TECHNICAL_SKILLS, SOFT_SKILLS
             self.all_skills = TECHNICAL_SKILLS + SOFT_SKILLS
+
+        # Load SBERT model for semantic embeddings
+        print("Loading SBERT transformer model...")
+        self.sbert = SentenceTransformer(self.metadata.get("semantic_model", "all-MiniLM-L6-v2"))
 
         print(f"ATS Engine loaded: {self.metadata['best_model']}")
         print(f"  CV Accuracy: {self.metadata['cv_accuracy']*100:.1f}%")
@@ -112,8 +110,11 @@ class ResumeScreeningEngine:
         skill_vector.append(float(features.get("num_red_flags", 0)))
 
         skill_array = np.array([skill_vector], dtype=np.float32)
-        tfidf_array = self.tfidf.transform([resume_text]).toarray()
-        combined = np.hstack([skill_array, tfidf_array])
+        
+        # Get semantic embeddings from SBERT
+        semantic_vector = self.sbert.encode([resume_text], convert_to_numpy=True)
+        
+        combined = np.hstack([skill_array, semantic_vector])
         combined_scaled = self.scaler.transform(combined)
 
         return combined_scaled, features

@@ -14,6 +14,8 @@ Pillow>=10.0.0
 
 # Feature Engineering
 scipy>=1.10.0
+sentence-transformers>=2.2.2
+torch>=2.0.0
 
 # Visualization (optional)
 matplotlib>=3.7.0

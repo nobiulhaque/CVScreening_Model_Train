@@ -46,8 +46,22 @@ class ResumeFeatureExtractor:
         sorted_soft = sorted(self.soft_skills, key=len, reverse=True)
         self.soft_regex = re.compile(r'\b(' + '|'.join(map(re.escape, sorted_soft)) + r')\b')
 
+    def clean_text(self, text: str) -> str:
+        """Clean and normalize text for better feature extraction and semantic matching."""
+        if not text:
+            return ""
+        # 1. Remove non-printable characters
+        text = "".join(char for char in text if char.isprintable() or char in "\n\t")
+        # 2. Normalize whitespace (tabs to spaces, multiple spaces to one)
+        text = re.sub(r'[ \t]+', ' ', text)
+        # 3. Normalize newlines (limit to max 2 consecutive)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        # 4. Strip leading/trailing whitespace
+        return text.strip()
+
     def extract_all(self, text: str) -> Dict:
         """Extract ALL features from resume text — full ATS-grade extraction"""
+        text = self.clean_text(text)
         text_lower = text.lower()
 
         features = {
@@ -554,7 +568,9 @@ def extract_text_from_file(file_path: Path) -> str:
                     # Skip problematic PDFs (e.g., corrupted or incompatible with PyPDF2)
                     return ""
             
-            if len(text.strip()) < 50:
+            text = re.sub(r'(?<! ) \n', '\n', text) # Clean up PyPDF2 artifacts
+            
+            if len(text.strip()) < 100:
                 # Fallback: Treat PDF as image and use OCR if it is empty/scanned
                 try:
                     from pdf2image import convert_from_path # type: ignore
@@ -564,6 +580,10 @@ def extract_text_from_file(file_path: Path) -> str:
                         text += pytesseract.image_to_string(img)
                 except (ImportError, Exception):
                     pass
+            
+            # Final cleanup
+            text = "".join(char for char in text if char.isprintable() or char in "\n\t")
+            text = re.sub(r'[ \t]+', ' ', text)
             return text.strip()
 
         elif suffix == '.docx':
