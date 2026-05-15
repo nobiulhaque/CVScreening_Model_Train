@@ -39,3 +39,7 @@ catboost_info/
 # Misc
 *.log
 *.tmp
+
+# Data
+dataset/
+train_output.txt
