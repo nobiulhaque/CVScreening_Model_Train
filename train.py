@@ -138,9 +138,9 @@ def train_model():
         print(f"  {cat:20} {count:4}")
 
     # ==================== SBERT Semantic Features ====================
-    print("\nBuilding SBERT semantic features (all-MiniLM-L6-v2)...")
-    # This model is fast, small (80MB), and very accurate for semantic search/classification
-    sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+    print("\nBuilding SBERT semantic features (all-mpnet-base-v2)...")
+    # Using the #1 ranked base model for semantic similarity
+    sbert_model = SentenceTransformer('all-mpnet-base-v2')
     
     # Check for GPU
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -182,20 +182,20 @@ def train_model():
         cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     catboost_params = {
-        'iterations': 300, 'depth': 6, 'learning_rate': 0.1,
-        'l2_leaf_reg': 3, 'random_seed': 42, 'verbose': 0,
+        'iterations': 1500, 'depth': 8, 'learning_rate': 0.05,
+        'l2_leaf_reg': 5, 'random_seed': 42, 'verbose': 0,
         'auto_class_weights': 'Balanced',
+        'early_stopping_rounds': 50
     }
     if has_gpu:
         catboost_params['task_type'] = 'GPU'
         catboost_params['devices'] = '0'
 
     lgbm_params = {
-        'n_estimators': 150, 'max_depth': 15, 'learning_rate': 0.1,
-        'num_leaves': 31, 'subsample': 0.8, 'colsample_bytree': 0.8,
-        'reg_alpha': 0.1, 'reg_lambda': 1.0, 'min_child_samples': 5,
-        'class_weight': 'balanced', 'random_state': 42,
-        'n_jobs': -1, 'verbose': -1,
+        'n_estimators': 1500, 'max_depth': 12, 'learning_rate': 0.05,
+        'num_leaves': 63, 'subsample': 0.8, 'colsample_bytree': 0.8,
+        'random_state': 42, 'n_jobs': -1, 'class_weight': 'balanced',
+        'early_stopping_rounds': 50
     }
     if has_gpu:
         lgbm_params['device'] = 'gpu'
@@ -328,7 +328,7 @@ def train_model():
         "skill_list": TECHNICAL_SKILLS + SOFT_SKILLS,
         "num_skill_features": features.shape[1],
         "num_semantic_features": sbert_embeddings.shape[1],
-        "semantic_model": "all-MiniLM-L6-v2",
+        "semantic_model": "all-mpnet-base-v2",
         "total_features": total_features,
         "total_samples": len(labels),
     }
